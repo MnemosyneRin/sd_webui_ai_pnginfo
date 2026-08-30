@@ -134,5 +134,5 @@ image, so it works on PNG and lossless WebP but never on JPEG.
 Run the self-check with:
 
 ```
-python extensions/sd_webui_comfyui_pnginfo/test_pnginfo.py
+python extensions/sd_webui_ai_pnginfo/test_pnginfo.py
 ```

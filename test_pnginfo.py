@@ -1,6 +1,6 @@
 """Self-check for the PNG Info converter. Run it directly:
 
-    python extensions/sd_webui_comfyui_pnginfo/test_pnginfo.py
+    python extensions/sd_webui_ai_pnginfo/test_pnginfo.py
 
 It stubs the webui modules, so it needs nothing but PIL.
 """
@@ -103,7 +103,7 @@ def stub_webui():
                         "modules.sd_schedulers": scheds, "modules.infotext_utils": infotext})
 
 
-def load(name="comfyui_pnginfo"):
+def load(name="ai_pnginfo"):
     stub_webui()
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, "scripts", name + ".py"))
     mod = importlib.util.module_from_spec(spec)
