@@ -25,6 +25,8 @@ RE_PARAM = re.compile(r'\s*([\w\s\-\/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)')
 def stub_webui():
     gr = types.ModuleType("gradio")
     gr.Checkbox = object
+    gr.Dropdown = object
+    gr.Image = type("Image", (), {})
     sys.modules["gradio"] = gr
 
     def read_info_from_image(image):
@@ -43,8 +45,21 @@ def stub_webui():
 
     images = types.ModuleType("modules.images")
     images.read_info_from_image = read_info_from_image
+    images.resize_image = lambda mode, im, w, h, upscaler=None, *a, **k: im
     sc = types.ModuleType("modules.script_callbacks")
     sc.on_ui_settings = lambda *a, **k: None
+    sc.on_before_image_saved = lambda *a, **k: None
+    sc.on_after_component = lambda *a, **k: None
+
+    class ImageSaveParams:
+        def __init__(self, image, p=None, filename="", pnginfo=None):
+            self.image, self.p, self.filename = image, p, filename
+            self.pnginfo = pnginfo if pnginfo is not None else {}
+    sc.ImageSaveParams = ImageSaveParams
+
+    infotext = types.ModuleType("modules.infotext_utils")
+    infotext.send_image_and_dimensions = lambda x: (x, 0, 0)
+    sys.modules["modules.infotext_utils"] = infotext
     shared = types.ModuleType("modules.shared")
     shared.opts = types.SimpleNamespace(data={}, add_option=lambda *a, **k: None)
     class OptionInfo:
@@ -82,9 +97,10 @@ def stub_webui():
     modules = types.ModuleType("modules")
     modules.images, modules.script_callbacks, modules.shared = images, sc, shared
     modules.sd_samplers, modules.sd_schedulers = samplers, scheds
+    modules.infotext_utils = infotext
     sys.modules.update({"modules": modules, "modules.images": images, "modules.script_callbacks": sc,
                         "modules.shared": shared, "modules.sd_samplers": samplers,
-                        "modules.sd_schedulers": scheds})
+                        "modules.sd_schedulers": scheds, "modules.infotext_utils": infotext})
 
 
 def load(name="comfyui_pnginfo"):
@@ -329,6 +345,44 @@ def main():
     assert m.read_stealth_payload(png()) is None
     assert m.read_stealth_payload(Image.new("RGBA", (8, 8), (1, 2, 3, 255))) is None
     print("ok  stealth alpha/rgb payloads, compressed and not")
+
+
+    # --- writing: round-trip through our own writer and reader ---------------
+    params_text = ("a robot" + chr(92) + "n" + "Negative prompt: blurry" + chr(92) + "n"
+                   + "Steps: 25, Sampler: Euler a, CFG scale: 6, Seed: 42, Size: 512x512")
+    for mode in ("alpha", "rgb"):
+        for compress in (True, False):
+            src = Image.new("RGBA" if mode == "alpha" else "RGB", (128, 128), (30, 60, 90, 255))
+            out = m.write_stealth_payload(src.copy(), params_text, mode, compress)
+            assert out is not None, (mode, compress, "payload did not fit")
+            assert m.read_stealth_payload(out) == params_text, (mode, compress)
+            # a hidden payload must not visibly change the image
+            worst = max(abs(a_ - b_) for pa, pb in zip(src.convert("RGBA").getdata(),
+                                                       out.convert("RGBA").getdata())
+                        for a_, b_ in zip(pa, pb))
+            assert worst <= 1, (mode, compress, "changed pixels by", worst)
+
+    # too small to hold it -> refuses rather than writing a truncated payload
+    assert m.write_stealth_payload(Image.new("RGBA", (4, 4)), params_text * 20) is None
+
+    # the save hook: writes only for PNG, only when enabled
+    def saved(filename, enabled=True, text=params_text):
+        img = Image.new("RGBA", (128, 128), (10, 20, 30, 255))
+        m.shared.opts.data["ai_pnginfo_write"] = enabled
+        p_ = m.ImageSaveParams(img, None, filename, {"parameters": text} if text else {})
+        m.add_stealth_pnginfo(p_)
+        return m.read_stealth_payload(p_.image)
+
+    assert saved("out.png") == params_text
+    assert saved("out.jpg") is None, "must not try to hide data in a lossy format"
+    assert saved("out.png", enabled=False) is None
+    assert saved("out.png", text=None) is None
+
+    # and it stands down if the standalone stealth extension is installed
+    m.shared.opts.data_labels = {"stealth_pnginfo": object()}
+    assert saved("out.png") is None, "two writers would overwrite each other"
+    m.shared.opts.data_labels = {}
+    print("ok  writing: round-trip, all variants, save hook guards")
 
 
 if __name__ == "__main__":

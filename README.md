@@ -1,6 +1,10 @@
-# sd_webui_comfyui_pnginfo
+# sd_webui_ai_pnginfo
 
-Makes **any AI image** readable in the WebUI **PNG Info** tab.
+Makes **any AI image** readable in the WebUI **PNG Info** tab — and optionally
+hides your own parameters in saved images so they survive sites that strip them.
+
+One extension, nothing else needed. It replaces `sd_webui_stealth_pnginfo`
+rather than sitting alongside it.
 
 The WebUI only understands flat A1111 `parameters` text. Everything else either
 shows nothing or dumps a wall of raw JSON, and "Send to txt2img" comes up empty.
@@ -79,6 +83,25 @@ Lookups run in parallel, are cached per hash for the session, and time out after
 answering `451 REGION_BLOCKED` on some connections), or a file simply not hosted
 there — falls back to the search links. Turn it off in settings to stay offline.
 
+## Hiding metadata in your own saves
+
+Off by default. Turn on **Settings → AI PNGinfo → "Hide the parameters in saved
+PNGs too"** and every PNG you save carries its A1111 parameters in the image's low
+bits as well as its text chunks, so the settings survive re-upload.
+
+| Setting | Meaning |
+|---|---|
+| Where to hide it | `alpha` holds one bit per pixel; `rgb` holds three and survives an alpha strip |
+| Compress | gzip the payload, so more fits |
+
+PNG only — JPEG and WebP compression destroys the low bits, so the hook skips
+them rather than writing something unreadable. Hiding data changes each channel
+by at most 1/255, which is invisible.
+
+If `sd_webui_stealth_pnginfo` is still installed, this extension detects it and
+does not write, since two writers would overwrite each other's payload. Remove
+that extension to use this one's writer.
+
 ## Metadata-stripped images
 
 Many sites strip PNG text chunks on upload. NovelAI works around this by hiding
@@ -97,10 +120,11 @@ character captions, sampler, schedule, CFG, seed and size all come back.
 
 Toggle under **Settings → AI PNGinfo**. Restart the WebUI after installing.
 
-The converter is published as `shared.ai_pnginfo_convert`. A patched
-`sd_webui_stealth_pnginfo` can call it for the metadata it decodes, so the two
-extensions share one implementation rather than competing - but that extension is
-not required, since the stealth payload is read here too.
+This does everything `sd_webui_stealth_pnginfo` did — reading hidden payloads,
+writing them, keeping the alpha channel out of img2img and upscalers, and making
+the PNG Info drop target accept RGBA — plus the format conversion, in one place.
+You do not need both. The converter is still published as
+`shared.ai_pnginfo_convert` for anything else that wants it.
 
 Image formats follow whatever the source tool writes. ComfyUI and NovelAI only
 write PNG; A1111 JPEG/WebP metadata lives in EXIF and is already read by the host,

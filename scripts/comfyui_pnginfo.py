@@ -28,6 +28,13 @@ import gradio as gr
 from PIL import Image
 
 from modules import images, script_callbacks, shared
+from modules.script_callbacks import ImageSaveParams
+
+try:
+    from modules import generation_parameters_copypaste as infotext_mod
+except ImportError:
+    # A1111 1.7+ renamed this; Forge Neo dropped the back-compat alias entirely
+    from modules import infotext_utils as infotext_mod
 
 
 # ComfyUI sampler_name -> neoforge sampler label (only confident matches; the
@@ -976,11 +983,131 @@ def read_info_from_image_comfyui(image):
     return converted, items
 
 
+def _bytes_to_bits(data):
+    return "".join(f"{b:08b}" for b in data)
+
+
+def write_stealth_payload(image, text, mode="alpha", compress=True):
+    """Hide `text` in the image's low bits, same format read_stealth_payload reads.
+
+    Returns the image (converted to RGBA for alpha mode), or None if it will not
+    fit. Alpha mode carries one bit per pixel, RGB mode three."""
+    sig = f"stealth_{'png' if mode == 'alpha' else 'rgb'}{'comp' if compress else 'info'}"
+    payload = gzip.compress(text.encode("utf-8")) if compress else text.encode("utf-8")
+    bits = _bytes_to_bits(sig.encode("utf-8")) + f"{len(payload) * 8:032b}" + _bytes_to_bits(payload)
+
+    if mode == "alpha":
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
+        capacity = image.width * image.height
+    else:
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGB")
+        capacity = image.width * image.height * 3
+    if len(bits) > capacity:
+        return None
+
+    px, i = image.load(), 0
+    for x in range(image.width):                  # column-major, as the reader expects
+        for y in range(image.height):
+            if i >= len(bits):
+                return image
+            v = list(px[x, y])
+            if mode == "alpha":
+                v[3] = (v[3] & ~1) | int(bits[i]); i += 1
+            else:
+                for c in range(3):
+                    if i < len(bits):
+                        v[c] = (v[c] & ~1) | int(bits[i]); i += 1
+            px[x, y] = tuple(v)
+    return image
+
+
+def _other_stealth_extension_active():
+    """The standalone stealth_pnginfo extension registers this option. Two writers
+    would overwrite each other's payload, so let it win and stay out of the way."""
+    return "stealth_pnginfo" in getattr(shared.opts, "data_labels", {})
+
+
+def add_stealth_pnginfo(params: ImageSaveParams):
+    if not shared.opts.data.get("ai_pnginfo_write", False):
+        return
+    if _other_stealth_extension_active():
+        return
+    if not str(params.filename).lower().endswith(".png"):
+        return                                    # lossy formats destroy low bits
+    text = (params.pnginfo or {}).get("parameters")
+    if not text:
+        return
+    try:
+        mode = shared.opts.data.get("ai_pnginfo_write_mode", "alpha")
+        written = write_stealth_payload(params.image, text, mode,
+                                        shared.opts.data.get("ai_pnginfo_write_compress", True))
+        if written is not None and written is not params.image:
+            params.image = written
+    except Exception:
+        pass
+
+
+def _has_hidden_payload(image):
+    try:
+        return read_stealth_payload(image) is not None
+    except Exception:
+        return False
+
+
+_previous_resize_image = getattr(images.resize_image, "_pnginfo_inner_resize", None) or images.resize_image
+
+
+def resize_image_drop_alpha(resize_mode, im, width, height, upscaler_name=None, *a, **kw):
+    """Upscalers choke on, or silently destroy, the alpha channel the payload
+    lives in - and a resized payload is garbage anyway. Drop it first."""
+    try:
+        if getattr(im, "mode", None) == "RGBA" and _has_hidden_payload(im):
+            im = im.convert("RGB")
+    except Exception:
+        pass
+    return _previous_resize_image(resize_mode, im, width, height, upscaler_name, *a, **kw)
+
+
+_previous_send_image_and_dimensions = getattr(
+    infotext_mod.send_image_and_dimensions, "_pnginfo_inner_send", None
+) or infotext_mod.send_image_and_dimensions
+
+
+def send_image_and_dimensions_drop_alpha(x):
+    """Strip the payload-bearing alpha channel before img2img receives the image."""
+    try:
+        if isinstance(x, Image.Image) and x.mode == "RGBA":
+            x = x.convert("RGB")
+    except Exception:
+        pass
+    return _previous_send_image_and_dimensions(x)
+
+
+def on_after_component(component, **_kwargs):
+    """The PNG Info drop target defaults to RGB, which throws away the alpha
+    channel before we ever see it. Ask gradio for RGBA instead."""
+    try:
+        if type(component) is gr.Image and getattr(component, "elem_id", None) == "pnginfo_image":
+            component.image_mode = "RGBA"
+    except Exception:
+        pass
+
+
 def on_ui_settings():
     section = ("comfyui_pnginfo", "AI PNGinfo")
     shared.opts.add_option("comfyui_pnginfo_enabled", shared.OptionInfo(
-        True, "Convert ComfyUI / SwarmUI / NovelAI / InvokeAI metadata in PNG Info",
+        True, "Read ComfyUI / SwarmUI / NovelAI / InvokeAI / stealth metadata in PNG Info",
         gr.Checkbox, {"interactive": True}, section=section))
+    shared.opts.add_option("ai_pnginfo_write", shared.OptionInfo(
+        False, "Hide the parameters in saved PNGs too, so they survive sites that strip metadata",
+        gr.Checkbox, {"interactive": True}, section=section))
+    shared.opts.add_option("ai_pnginfo_write_mode", shared.OptionInfo(
+        "alpha", "Where to hide it (alpha holds more; rgb survives an alpha strip)",
+        gr.Dropdown, {"choices": ["alpha", "rgb"], "interactive": True}, section=section))
+    shared.opts.add_option("ai_pnginfo_write_compress", shared.OptionInfo(
+        True, "Compress the hidden payload", gr.Checkbox, {"interactive": True}, section=section))
 
 
 read_info_from_image_comfyui._pnginfo_inner = _previous_read_info_from_image
@@ -989,4 +1116,12 @@ images.read_info_from_image = read_info_from_image_comfyui
 # this off shared at call time).
 shared.ai_pnginfo_convert = convert_metadata
 
+resize_image_drop_alpha._pnginfo_inner_resize = _previous_resize_image
+images.resize_image = resize_image_drop_alpha
+
+send_image_and_dimensions_drop_alpha._pnginfo_inner_send = _previous_send_image_and_dimensions
+infotext_mod.send_image_and_dimensions = send_image_and_dimensions_drop_alpha
+
 script_callbacks.on_ui_settings(on_ui_settings)
+script_callbacks.on_before_image_saved(add_stealth_pnginfo)
+script_callbacks.on_after_component(on_after_component)
