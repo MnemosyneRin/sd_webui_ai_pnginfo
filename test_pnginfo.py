@@ -236,6 +236,22 @@ def main():
     assert not {"Comment", "Description", "Software", "Source"} & set(items), items
     print("ok  NovelAI: character captions, weights, full parameters")
 
+    # ...unless sdwebui-nai-api is installed, which reads NovelAI itself and wants
+    # the NAI dialect intact. Chunks are handed back untouched; a stealth-only
+    # image gets its raw JSON back, which is what that extension parses.
+    sys.modules["nai_api_gen"] = types.ModuleType("nai_api_gen")
+    try:
+        untouched = m._previous_read_info_from_image(img)
+        assert m.read_info_from_image_comfyui(img) == untouched, "NovelAI chunks were rewritten"
+        raw = json.dumps({"Software": "NovelAI", "Comment": json.dumps(NAI_COMMENT)})
+        text, _ = m.read_info_from_image_comfyui(stealth_png(raw))
+        assert text == raw, text
+    finally:
+        del sys.modules["nai_api_gen"]
+    text, _ = m.read_info_from_image_comfyui(img)
+    assert "zhu yuan" in text, "conversion did not come back"
+    print("ok  NovelAI: left alone when sdwebui-nai-api is installed")
+
     # --- SwarmUI ------------------------------------------------------------
     img = png((1248, 1824), parameters=json.dumps(SWARM))
     text, items = m.read_info_from_image_comfyui(img)

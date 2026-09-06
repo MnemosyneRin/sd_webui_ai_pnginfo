@@ -23,6 +23,7 @@ import gzip
 import json
 import os
 import re
+import sys
 
 import gradio as gr
 from PIL import Image
@@ -290,11 +291,21 @@ def _v4_caption(v4):
     return ", ".join(p for p in parts if p)
 
 
+def nai_api_extension_active():
+    """sdwebui-nai-api reads NovelAI metadata itself and keeps it in NovelAI's own
+    dialect (CHAR: lines, {}/[] emphasis, NAI sampler names) so the prompt can be
+    sent straight back to the API. Rewriting it as A1111 first destroys that, so
+    where that extension is installed we leave NovelAI images entirely alone and
+    let it do the reading. It imports its package at startup, long before any
+    image is read."""
+    return "nai_api_gen" in sys.modules
+
+
 def build_novelai_infotext(data, image):
     """A1111 infotext from a NovelAI metadata dict — the same dict NovelAI puts
     in the PNG text chunks and in the stealth alpha payload
     (Title/Description/Software/Source/Comment). Returns text or None."""
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or nai_api_extension_active():
         return None
     comment = data.get("Comment")
     if data.get("Software") != "NovelAI" and comment is None:
@@ -812,9 +823,7 @@ def convert_json_metadata(data, image):
     if "sui_image_params" in data:
         return build_swarmui_infotext(data, image)
     if data.get("Software") == "NovelAI" or "Comment" in data:
-        text = build_novelai_infotext(data, image)
-        if text:
-            return text
+        return build_novelai_infotext(data, image)
     if "invokeai_metadata" in data or "sd-metadata" in data or "Dream" in data:
         text = convert_invokeai_metadata(data, image)
         if text:
@@ -920,9 +929,7 @@ def convert_metadata(image, items=None, geninfo=None):
     items = items if isinstance(items, dict) else {}
 
     if items.get("Software") == "NovelAI" and items.get("Comment") is not None:
-        text = build_novelai_infotext(items, image)
-        if text:
-            return text
+        return build_novelai_infotext(items, image)
 
     data = _load_json(geninfo) or _load_json(items.get("parameters"))
     if data is not None:
